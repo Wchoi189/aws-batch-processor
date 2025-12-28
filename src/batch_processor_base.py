@@ -40,11 +40,14 @@ from src.schemas import OCRStorageItem
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Upstage API configuration
-API_URL = "https://api.upstage.ai/v1/document-ai/ocr"
-DEFAULT_CONCURRENCY = 3  # Conservative to avoid rate limiting
+# Upstage API configuration - Using async endpoint for better rate limit handling
+API_URL_SUBMIT = "https://api.upstage.ai/v1/document-digitization/async"
+API_URL_STATUS = "https://api.upstage.ai/v1/document-digitization/requests"
+DEFAULT_CONCURRENCY = 5  # Higher concurrency for async submission (no waiting)
 DEFAULT_BATCH_SIZE = 500
-REQUEST_DELAY = 0.1  # 100ms delay between requests (max ~600/min with 3 concurrent)
+REQUEST_DELAY = 0.05  # 50ms delay for submission (faster since we're not waiting)
+POLL_DELAY = 2.0  # 2s delay between polling checks
+POLL_MAX_WAIT = 300  # Max 5 minutes wait per request
 
 
 class ResumableBatchProcessor:
@@ -97,17 +100,16 @@ class ResumableBatchProcessor:
             logger.error(f"Failed to download {s3_uri} from S3: {e}")
             return None
 
-    async def process_single_image(
+    async def submit_image_async(
         self,
         session: aiohttp.ClientSession,
         semaphore: asyncio.Semaphore,
         image_row: dict,
-        dataset_name: str,
         retry_count: int = 0,
         max_retries: int = 3,
-    ) -> OCRStorageItem | None:
-        """Process a single image with API call."""
-        async with semaphore:  # Limit concurrent requests
+    ) -> str | None:
+        """Submit image to async API and return request_id."""
+        async with semaphore:
             image_path_str = image_row['image_path']
             image_path = Path(image_path_str)
             temp_file_path = None
@@ -126,87 +128,45 @@ class ResumableBatchProcessor:
                 return None
 
             try:
-                # Rate limiting: small delay before each request
                 await asyncio.sleep(REQUEST_DELAY)
-
-                start_time = time.time()
 
                 # Read image
                 with open(image_path, 'rb') as f:
                     image_bytes = f.read()
 
-                # Call API
+                # Submit to async API
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 data = aiohttp.FormData()
                 data.add_field('document', image_bytes, filename=image_path.name)
+                data.add_field('model', 'document-parse')
 
-                async with session.post(API_URL, headers=headers, data=data) as response:
-                    response_time_ms = (time.time() - start_time) * 1000
-
+                async with session.post(API_URL_SUBMIT, headers=headers, data=data) as response:
                     if response.status == 200:
-                        api_result = await response.json()
-
-                        # Log success
-                        logger.debug(f"API success: {image_path.name} ({response_time_ms:.1f}ms)")
-
-                        # Parse API response
-                        polygons = []
-                        texts = []
-                        labels = []
-
-                        for page in api_result.get('pages', []):
-                            for word in page.get('words', []):
-                                bbox = word.get('boundingBox', {}).get('vertices', [])
-                                poly = [[float(v.get('x', 0)), float(v.get('y', 0))] for v in bbox]
-
-                                polygons.append(poly)
-                                texts.append(word.get('text', ''))
-                                labels.append('text')
-
-                        # Create storage item (preserve original S3 URI if applicable)
-                        original_image_path = image_path_str if image_path_str.startswith('s3://') else str(image_path)
-                        image_filename = Path(image_path_str).name if image_path_str.startswith('s3://') else image_path.name
-                        
-                        result = OCRStorageItem(
-                            id=f"{dataset_name}_pseudo_{image_path.stem}",
-                            split="pseudo",
-                            image_path=original_image_path,
-                            image_filename=image_filename,
-                            width=int(image_row.get('width', 0)),
-                            height=int(image_row.get('height', 0)),
-                            polygons=polygons,
-                            texts=texts,
-                            labels=labels,
-                            metadata={"source": "upstage_api", "enhanced": False}
-                        )
-                        
-                        # Clean up temp file if downloaded from S3
-                        if temp_file_path and temp_file_path.exists():
-                            temp_file_path.unlink()
-                        
-                        return result
-
-                    elif response.status == 429:
-                        # Rate limited - retry with longer backoff (up to max_retries)
-                        logger.warning(f"Rate limited: {image_path.name} (retry {retry_count + 1}/{max_retries})")
-
-                        if retry_count >= max_retries:
-                            logger.error(f"Max retries ({max_retries}) exceeded for {image_path.name}")
+                        result = await response.json()
+                        request_id = result.get('request_id')
+                        if request_id:
+                            logger.debug(f"Submitted: {image_path.name} → {request_id}")
+                            if temp_file_path and temp_file_path.exists():
+                                temp_file_path.unlink()
+                            return request_id
+                        else:
+                            logger.error(f"No request_id in response for {image_path.name}")
                             if temp_file_path and temp_file_path.exists():
                                 temp_file_path.unlink()
                             return None
 
-                        # Clean up temp file before retry (will be re-downloaded if needed)
-                        if temp_file_path and temp_file_path.exists():
-                            temp_file_path.unlink()
+                    elif response.status == 429:
+                        logger.warning(f"Rate limited (submit): {image_path.name} (retry {retry_count + 1}/{max_retries})")
+                        if retry_count >= max_retries:
+                            logger.error(f"Max retries exceeded for {image_path.name}")
+                            if temp_file_path and temp_file_path.exists():
+                                temp_file_path.unlink()
+                            return None
                         
-                        backoff_delay = min(5 * (retry_count + 1), 30)  # Exponential backoff, max 30s
-                        logger.warning(f"Retrying after {backoff_delay}s...")
+                        backoff_delay = min(5 * (retry_count + 1), 30)
                         await asyncio.sleep(backoff_delay)
-                        # Retry will download image again if it's an S3 URI
-                        return await self.process_single_image(
-                            session, semaphore, image_row, dataset_name,
-                            retry_count=retry_count + 1, max_retries=max_retries
+                        return await self.submit_image_async(
+                            session, semaphore, image_row, retry_count + 1, max_retries
                         )
 
                     else:
@@ -217,10 +177,141 @@ class ResumableBatchProcessor:
                         return None
 
             except Exception as e:
-                logger.error(f"Failed to process {image_path.name}: {e}")
+                logger.error(f"Failed to submit {image_path.name}: {e}")
                 if temp_file_path and temp_file_path.exists():
                     temp_file_path.unlink()
                 return None
+
+    async def poll_and_get_result(
+        self,
+        session: aiohttp.ClientSession,
+        request_id: str,
+        image_row: dict,
+        dataset_name: str,
+    ) -> OCRStorageItem | None:
+        """Poll for async result and download when ready."""
+        start_time = time.time()
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        
+        while time.time() - start_time < POLL_MAX_WAIT:
+            await asyncio.sleep(POLL_DELAY)
+            
+            try:
+                async with session.get(f"{API_URL_STATUS}/{request_id}", headers=headers) as response:
+                    if response.status == 200:
+                        status_data = await response.json()
+                        status = status_data.get('status')
+                        
+                        if status == 'completed':
+                            # Get download_url from batches
+                            batches = status_data.get('batches', [])
+                            if batches and batches[0].get('download_url'):
+                                download_url = batches[0]['download_url']
+                                
+                                # Download result
+                                async with session.get(download_url) as result_response:
+                                    if result_response.status == 200:
+                                        api_result = await result_response.json()
+                                        
+                                        # Parse API response - async API may have different structure
+                                        polygons = []
+                                        texts = []
+                                        labels = []
+
+                                        # Try different response formats
+                                        # Format 1: Direct pages array (sync API format)
+                                        pages = api_result.get('pages', [])
+                                        
+                                        # Format 2: Nested structure (async API might wrap it)
+                                        if not pages and 'result' in api_result:
+                                            pages = api_result['result'].get('pages', [])
+                                        
+                                        # Format 3: Check if it's a list directly
+                                        if not pages and isinstance(api_result, list):
+                                            pages = api_result
+                                        
+                                        for page in pages:
+                                            # Handle both dict and direct word lists
+                                            words = page.get('words', []) if isinstance(page, dict) else page
+                                            
+                                            for word in words:
+                                                if isinstance(word, dict):
+                                                    bbox = word.get('boundingBox', {}).get('vertices', [])
+                                                    if bbox:
+                                                        poly = [[float(v.get('x', 0)), float(v.get('y', 0))] for v in bbox]
+                                                        polygons.append(poly)
+                                                        texts.append(word.get('text', ''))
+                                                        labels.append('text')
+                                        
+                                        logger.debug(f"Parsed {len(polygons)} polygons from async result")
+
+                                        # Create storage item
+                                        image_path_str = image_row['image_path']
+                                        original_image_path = image_path_str if image_path_str.startswith('s3://') else str(image_path_str)
+                                        image_filename = Path(image_path_str).name if image_path_str.startswith('s3://') else Path(image_path_str).name
+                                        
+                                        result = OCRStorageItem(
+                                            id=f"{dataset_name}_pseudo_{Path(image_path_str).stem}",
+                                            split="pseudo",
+                                            image_path=original_image_path,
+                                            image_filename=image_filename,
+                                            width=int(image_row.get('width', 0)),
+                                            height=int(image_row.get('height', 0)),
+                                            polygons=polygons,
+                                            texts=texts,
+                                            labels=labels,
+                                            metadata={"source": "upstage_api_async", "enhanced": False}
+                                        )
+                                        
+                                        logger.debug(f"Completed: {request_id}")
+                                        return result
+                                    else:
+                                        logger.error(f"Failed to download result for {request_id}: {result_response.status}")
+                                        return None
+                            else:
+                                logger.error(f"No download_url in completed request {request_id}")
+                                return None
+                                
+                        elif status == 'failed':
+                            failure_msg = status_data.get('failure_message', 'Unknown error')
+                            logger.error(f"Request {request_id} failed: {failure_msg}")
+                            return None
+                        # else: still processing, continue polling
+                        
+                    elif response.status == 429:
+                        logger.warning(f"Rate limited (poll): {request_id}")
+                        await asyncio.sleep(POLL_DELAY * 2)
+                        continue
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Poll error {response.status} for {request_id}: {error_text[:200]}")
+                        return None
+                        
+            except Exception as e:
+                logger.error(f"Error polling {request_id}: {e}")
+                await asyncio.sleep(POLL_DELAY)
+                continue
+        
+        logger.error(f"Timeout waiting for {request_id}")
+        return None
+
+    async def process_single_image(
+        self,
+        session: aiohttp.ClientSession,
+        semaphore: asyncio.Semaphore,
+        image_row: dict,
+        dataset_name: str,
+        retry_count: int = 0,
+        max_retries: int = 3,
+    ) -> OCRStorageItem | None:
+        """Process a single image using async API (submit + poll)."""
+        # Phase 1: Submit
+        request_id = await self.submit_image_async(session, semaphore, image_row, retry_count, max_retries)
+        if not request_id:
+            return None
+        
+        # Phase 2: Poll and get result
+        return await self.poll_and_get_result(session, request_id, image_row, dataset_name)
 
     async def process_batch(
         self,
