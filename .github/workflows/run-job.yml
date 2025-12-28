@@ -1,0 +1,183 @@
+name: Run Batch Processing Job
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: 'Dataset to process'
+        required: true
+        type: choice
+        options:
+          - baseline_train
+          - baseline_val
+        default: 'baseline_train'
+
+      resume:
+        description: 'Resume from checkpoints'
+        required: false
+        type: boolean
+        default: false
+
+      batch_size:
+        description: 'Batch size for checkpoints'
+        required: false
+        type: number
+        default: 500
+
+      concurrency:
+        description: 'Concurrent API requests'
+        required: false
+        type: number
+        default: 3
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  S3_BUCKET: ${{ secrets.S3_BUCKET }}
+  JOB_QUEUE: batch-processor-queue
+
+jobs:
+  upload-dataset:
+    name: Upload Dataset to S3
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION }}
+
+      - name: Check if dataset exists in S3
+        id: check-dataset
+        run: |
+          if aws s3 ls "s3://${{ secrets.S3_BUCKET }}/data/processed/${{ github.event.inputs.dataset }}.parquet"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload dataset to S3 (if not exists)
+        if: steps.check-dataset.outputs.exists == 'false'
+        run: |
+          echo "⚠️ Dataset not found in S3. Please upload manually:"
+          echo "   aws s3 cp data/processed/${{ github.event.inputs.dataset }}.parquet s3://${{ secrets.S3_BUCKET }}/data/processed/"
+          exit 1
+
+  submit-job:
+    name: Submit AWS Batch Job
+    needs: upload-dataset
+    runs-on: ubuntu-latest
+    outputs:
+      job-id: ${{ steps.submit.outputs.job-id }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION }}
+
+      - name: Submit Batch job
+        id: submit
+        run: |
+          JOB_NAME="pseudo-labels-${{ github.event.inputs.dataset }}-$(date +%Y%m%d-%H%M%S)"
+
+          PARAMETERS="{\"dataset_name\": \"${{ github.event.inputs.dataset }}\""
+          PARAMETERS="${PARAMETERS}, \"batch_size\": \"${{ github.event.inputs.batch_size }}\""
+          PARAMETERS="${PARAMETERS}, \"concurrency\": \"${{ github.event.inputs.concurrency }}\""
+
+          if [ "${{ github.event.inputs.resume }}" == "true" ]; then
+            PARAMETERS="${PARAMETERS}, \"resume\": \"true\""
+          fi
+
+          PARAMETERS="${PARAMETERS}}"
+
+          # Submit job
+          JOB_ID=$(aws batch submit-job \
+            --job-name "$JOB_NAME" \
+            --job-definition pseudo-label-processor \
+            --job-queue ${{ env.JOB_QUEUE }} \
+            --container-overrides "{
+              \"environment\": [
+                {\"name\": \"DATASET_NAME\", \"value\": \"${{ github.event.inputs.dataset }}\"},
+                {\"name\": \"S3_BUCKET\", \"value\": \"${{ secrets.S3_BUCKET }}\"}
+              ],
+              \"command\": [
+                \"python\", \"-m\", \"src.processor\",
+                \"--dataset-name\", \"${{ github.event.inputs.dataset }}\",
+                \"--batch-size\", \"${{ github.event.inputs.batch_size }}\",
+                \"--concurrency\", \"${{ github.event.inputs.concurrency }}\"
+                $(if [ \"${{ github.event.inputs.resume }}\" == \"true\" ]; then echo \", \"--resume\"\"; fi)
+              ]
+            }" \
+            --query 'jobId' \
+            --output text)
+
+          echo "job-id=$JOB_ID" >> $GITHUB_OUTPUT
+          echo "### Batch Job Submitted :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job ID:** \`$JOB_ID\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job Name:** \`$JOB_NAME\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dataset:** \`${{ github.event.inputs.dataset }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Resume:** \`${{ github.event.inputs.resume }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "[View job in AWS Console](https://console.aws.amazon.com/batch/home?region=${{ secrets.AWS_REGION }}#jobs/detail/$JOB_ID)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Monitor job status
+        run: |
+          echo "Monitoring job: ${{ steps.submit.outputs.job-id }}"
+
+          while true; do
+            STATUS=$(aws batch describe-jobs --jobs ${{ steps.submit.outputs.job-id }} --query 'jobs[0].status' --output text)
+            echo "Job status: $STATUS"
+
+            if [ "$STATUS" == "SUCCEEDED" ]; then
+              echo "✅ Job completed successfully!"
+              exit 0
+            elif [ "$STATUS" == "FAILED" ]; then
+              echo "❌ Job failed!"
+              aws batch describe-jobs --jobs ${{ steps.submit.outputs.job-id }} --query 'jobs[0].statusReason'
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+  download-results:
+    name: Download Results
+    needs: submit-job
+    runs-on: ubuntu-latest
+    if: success()
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION }}
+
+      - name: Download results from S3
+        run: |
+          mkdir -p results
+
+          # Download output file
+          aws s3 cp \
+            "s3://${{ secrets.S3_BUCKET }}/data/processed/${{ github.event.inputs.dataset }}_pseudo_labels.parquet" \
+            "results/${{ github.event.inputs.dataset }}_pseudo_labels.parquet"
+
+          echo "### Results Ready :tada:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Results downloaded to: \`results/${{ github.event.inputs.dataset }}_pseudo_labels.parquet\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pseudo-labels-${{ github.event.inputs.dataset }}
+          path: results/*.parquet
+          retention-days: 30

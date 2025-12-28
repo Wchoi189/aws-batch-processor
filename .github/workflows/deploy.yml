@@ -1,0 +1,122 @@
+name: Deploy Batch Processor to AWS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'config/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_URI }}
+
+jobs:
+  build-and-deploy:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        run: |
+          docker build -f config/Dockerfile -t batch-processor:${{ github.sha }} .
+          docker tag batch-processor:${{ github.sha }} batch-processor:latest
+
+      - name: Push to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: batch-processor
+        run: |
+          docker tag batch-processor:latest $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker tag batch-processor:${{ github.sha }} $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
+
+      - name: Update Batch Job Definition
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: batch-processor
+        run: |
+          # Update job definition with new image
+          cat > /tmp/job-definition.json <<EOF
+          {
+            "jobDefinitionName": "pseudo-label-processor",
+            "type": "container",
+            "containerProperties": {
+              "image": "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest",
+              "vcpus": 2,
+              "memory": 4096,
+              "jobRoleArn": "${{ secrets.JOB_ROLE_ARN }}",
+              "executionRoleArn": "${{ secrets.EXEC_ROLE_ARN }}",
+              "environment": [
+                {
+                  "name": "AWS_SECRET_ARN",
+                  "value": "${{ secrets.SECRET_ARN }}"
+                },
+                {
+                  "name": "S3_BUCKET",
+                  "value": "${{ secrets.S3_BUCKET }}"
+                }
+              ],
+              "resourceRequirements": [
+                {
+                  "type": "VCPU",
+                  "value": "2"
+                },
+                {
+                  "type": "MEMORY",
+                  "value": "4096"
+                }
+              ],
+              "command": [
+                "python",
+                "-m",
+                "src.processor"
+              ]
+            },
+            "retryStrategy": {
+              "attempts": 3,
+              "evaluateOnExit": [
+                {
+                  "onStatusReason": "Host EC2*",
+                  "action": "RETRY"
+                }
+              ]
+            },
+            "timeout": {
+              "attemptDurationSeconds": 7200
+            }
+          }
+          EOF
+
+          aws batch register-job-definition --cli-input-json file:///tmp/job-definition.json
+
+      - name: Deployment summary
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: batch-processor
+        run: |
+          echo "### Deployment Summary :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** \`${ECR_REGISTRY}/${ECR_REPOSITORY}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit SHA:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job Definition:** \`pseudo-label-processor\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Ready to run batch jobs! 🎉" >> $GITHUB_STEP_SUMMARY

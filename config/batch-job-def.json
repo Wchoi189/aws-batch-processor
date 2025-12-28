@@ -1,0 +1,63 @@
+{
+  "jobDefinitionName": "pseudo-label-processor",
+  "type": "container",
+  "platformCapabilities": [
+    "FARGATE"
+  ],
+  "containerProperties": {
+    "image": "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_REGION.amazonaws.com/batch-processor:latest",
+    "fargatePlatformConfiguration": {
+      "platformVersion": "LATEST"
+    },
+    "resourceRequirements": [
+      {
+        "type": "VCPU",
+        "value": "2"
+      },
+      {
+        "type": "MEMORY",
+        "value": "4096"
+      }
+    ],
+    "jobRoleArn": "arn:aws:iam::YOUR_ACCOUNT_ID:role/BatchProcessorJobRole",
+    "executionRoleArn": "arn:aws:iam::YOUR_ACCOUNT_ID:role/BatchProcessorExecutionRole",
+    "networkConfiguration": {
+      "assignPublicIp": "ENABLED"
+    },
+    "environment": [
+      {
+        "name": "AWS_SECRET_ARN",
+        "value": "arn:aws:secretsmanager:YOUR_REGION:YOUR_ACCOUNT_ID:secret:upstage-api-key"
+      },
+      {
+        "name": "S3_BUCKET",
+        "value": "YOUR_S3_BUCKET_NAME"
+      },
+      {
+        "name": "CHECKPOINT_PREFIX",
+        "value": "checkpoints/"
+      }
+    ],
+    "command": [
+      "python",
+      "-m",
+      "src.processor"
+    ]
+  },
+  "retryStrategy": {
+    "attempts": 3,
+    "evaluateOnExit": [
+      {
+        "onStatusReason": "Host EC2*",
+        "action": "RETRY"
+      },
+      {
+        "onStatusReason": "Task failed to start*",
+        "action": "RETRY"
+      }
+    ]
+  },
+  "timeout": {
+    "attemptDurationSeconds": 7200
+  }
+}

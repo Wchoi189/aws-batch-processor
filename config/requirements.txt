@@ -1,0 +1,23 @@
+# Minimal dependencies for AWS Batch pseudo-label processor
+# Only what's needed for API calls, S3 operations, and data handling
+
+# Core async HTTP
+aiohttp>=3.9.0
+
+# AWS SDK
+boto3>=1.34.0
+aioboto3>=12.3.0
+
+# Data handling
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# Pydantic for data validation (OCRStorageItem schema)
+pydantic>=2.5.0
+
+# Progress bar
+tqdm>=4.66.0
+
+# Image operations (lightweight)
+Pillow>=10.0.0
+numpy>=1.24.0
