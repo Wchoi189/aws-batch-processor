@@ -505,22 +505,61 @@ class ResumableBatchProcessor:
         poll_semaphore = asyncio.Semaphore(POLL_CONCURRENCY)
 
         async with aiohttp.ClientSession() as session:
+            # Create tasks with image_row tracking
             tasks = []
+            image_rows = []
             for idx, row in df.iloc[start_idx:].iterrows():
+                row_dict = row.to_dict()
+                image_rows.append((idx, row_dict))
                 task = self.process_single_image(
-                    session, semaphore, row.to_dict(), dataset_name, poll_semaphore
+                    session, semaphore, row_dict, dataset_name, poll_semaphore
                 )
                 tasks.append(task)
 
-            # Process with progress bar
+            # Process with progress bar and track which image each result belongs to
+            completed_tasks = {}
             for coro in tqdm(
                 asyncio.as_completed(tasks),
                 total=len(tasks),
                 desc=f"Processing batch from {start_idx}"
             ):
                 result = await coro
+                # Find which image this result belongs to by matching request
+                # We'll handle this differently - create a mapping
                 if result:
                     results.append(result)
+                else:
+                    # Find the corresponding image_row for this failed task
+                    # Since as_completed doesn't preserve order, we need to track differently
+                    pass
+            
+            # Create entries for failed images
+            # Get all image IDs that succeeded
+            successful_ids = {result.id for result in results}
+            
+            # Create empty entries for failed images
+            for idx, row_dict in image_rows:
+                image_path_str = row_dict.get('image_path', '')
+                image_id = f"{dataset_name}_pseudo_{Path(image_path_str).stem if image_path_str else idx}"
+                
+                if image_id not in successful_ids:
+                    # Create empty result for failed image
+                    original_image_path = image_path_str if image_path_str.startswith('s3://') else str(image_path_str)
+                    image_filename = Path(image_path_str).name if image_path_str.startswith('s3://') else Path(image_path_str).name if image_path_str else f"image_{idx}"
+                    
+                    failed_result = OCRStorageItem(
+                        id=image_id,
+                        split="pseudo",
+                        image_path=original_image_path,
+                        image_filename=image_filename,
+                        width=int(row_dict.get('width', 0)),
+                        height=int(row_dict.get('height', 0)),
+                        polygons=[],
+                        texts=[],
+                        labels=[],
+                        metadata={"source": "upstage_api_async", "enhanced": False, "status": "failed"}
+                    )
+                    results.append(failed_result)
 
         return results
 
