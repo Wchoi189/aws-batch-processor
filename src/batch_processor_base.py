@@ -26,6 +26,7 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -212,10 +213,16 @@ class ResumableBatchProcessor:
                         status = status_data.get('status')
                         
                         if status == 'completed':
-                            # Get download_url from batches
+                            # Get download_url from batches (async API structure)
                             batches = status_data.get('batches', [])
-                            if batches and batches[0].get('download_url'):
-                                download_url = batches[0]['download_url']
+                            if batches and isinstance(batches, list) and len(batches) > 0:
+                                first_batch = batches[0]
+                                if isinstance(first_batch, dict):
+                                    download_url = first_batch.get('download_url')
+                            else:
+                                download_url = status_data.get('download_url')
+                            
+                            if download_url:
                                 
                                 # Download result
                                 async with session.get(download_url) as result_response:
@@ -228,98 +235,119 @@ class ResumableBatchProcessor:
                                         labels = []
 
                                         # Log actual response structure for debugging
-                                        logger.info(f"API response type: {type(api_result)}")
+                                        logger.debug(f"API response type: {type(api_result)}")
                                         if isinstance(api_result, dict):
-                                            logger.info(f"API response keys: {list(api_result.keys())}")
+                                            logger.debug(f"API response keys: {list(api_result.keys())}")
                                         
-                                        # Try different response formats
-                                        pages = []
+                                        # Upstage async API returns structure: {elements: [...], content: {...}, ocr: bool}
+                                        # Elements have: coordinates (normalized 0-1), content.text/html, category
                                         
-                                        # Format 1: Direct pages array (sync API format)
+                                        elements = []
+                                        
                                         if isinstance(api_result, dict):
-                                            pages = api_result.get('pages', [])
+                                            # Format 1: elements array (async API format)
+                                            elements = api_result.get('elements', [])
                                             
-                                            # Format 2: Nested structure (async API might wrap it)
-                                            if not pages and 'result' in api_result:
+                                            # Format 2: Try pages (sync API format) for backward compatibility
+                                            if not elements:
+                                                pages = api_result.get('pages', [])
+                                                if pages:
+                                                    # Convert pages format to elements format
+                                                    for page in pages:
+                                                        if isinstance(page, dict):
+                                                            words = page.get('words', [])
+                                                            elements.extend(words)
+                                            
+                                            # Format 3: Nested structure
+                                            if not elements and 'result' in api_result:
                                                 result_data = api_result['result']
                                                 if isinstance(result_data, dict):
-                                                    pages = result_data.get('pages', [])
+                                                    elements = result_data.get('elements', result_data.get('pages', []))
                                                 elif isinstance(result_data, list):
-                                                    pages = result_data
-                                            
-                                            # Format 3: Check for document structure
-                                            if not pages and 'document' in api_result:
-                                                doc = api_result['document']
-                                                if isinstance(doc, dict):
-                                                    pages = doc.get('pages', [])
+                                                    elements = result_data
                                         
                                         # Format 4: Check if it's a list directly
-                                        if not pages and isinstance(api_result, list):
-                                            pages = api_result
+                                        if not elements and isinstance(api_result, list):
+                                            elements = api_result
                                         
-                                        logger.info(f"Found {len(pages)} pages")
+                                        logger.debug(f"Found {len(elements)} elements")
                                         
-                                        # Parse pages
-                                        for page_idx, page in enumerate(pages):
-                                            # Handle both dict and direct word lists
-                                            if isinstance(page, dict):
-                                                words = page.get('words', [])
-                                                # Also check for other possible keys
-                                                if not words:
-                                                    words = page.get('blocks', [])
-                                                if not words:
-                                                    words = page.get('elements', [])
-                                            elif isinstance(page, list):
-                                                words = page
-                                            else:
-                                                words = []
+                                        # Get image dimensions for coordinate conversion
+                                        width = int(image_row.get('width', 0))
+                                        height = int(image_row.get('height', 0))
+                                        
+                                        # Parse elements
+                                        for element in elements:
+                                            if not isinstance(element, dict):
+                                                continue
                                             
-                                            logger.debug(f"Page {page_idx}: {len(words)} words")
+                                            # Get coordinates (normalized 0-1 in async API)
+                                            coords = element.get('coordinates', [])
                                             
-                                            for word in words:
-                                                if isinstance(word, dict):
-                                                    # Try multiple bounding box formats
-                                                    bbox = None
+                                            # Also try other formats for backward compatibility
+                                            if not coords:
+                                                if 'boundingBox' in element:
+                                                    bbox_obj = element['boundingBox']
+                                                    if isinstance(bbox_obj, dict):
+                                                        coords = bbox_obj.get('vertices', [])
+                                                    elif isinstance(bbox_obj, list):
+                                                        coords = bbox_obj
+                                            
+                                            if not coords:
+                                                coords = element.get('bbox', element.get('polygon', []))
+                                            
+                                            if coords and isinstance(coords, list) and len(coords) >= 3:
+                                                try:
+                                                    # Convert coordinates to polygon
+                                                    if isinstance(coords[0], dict):
+                                                        # Format: [{"x": 0.2447, "y": 0.0714}, ...] (normalized)
+                                                        poly = [[float(v.get('x', 0)), float(v.get('y', 0))] for v in coords]
+                                                    elif isinstance(coords[0], (list, tuple)):
+                                                        # Format: [[x, y], ...]
+                                                        poly = [[float(v[0]), float(v[1])] for v in coords]
+                                                    else:
+                                                        continue
                                                     
-                                                    # Format 1: boundingBox.vertices
-                                                    if 'boundingBox' in word:
-                                                        bbox_obj = word['boundingBox']
-                                                        if isinstance(bbox_obj, dict):
-                                                            bbox = bbox_obj.get('vertices', [])
-                                                        elif isinstance(bbox_obj, list):
-                                                            bbox = bbox_obj
+                                                    # Convert normalized coordinates (0-1) to pixel coordinates if needed
+                                                    # Check if coordinates are normalized (all values < 1.0)
+                                                    is_normalized = all(0 <= p[0] <= 1.0 and 0 <= p[1] <= 1.0 for p in poly)
                                                     
-                                                    # Format 2: bbox directly
-                                                    if not bbox and 'bbox' in word:
-                                                        bbox = word['bbox']
+                                                    if is_normalized and width > 0 and height > 0:
+                                                        # Convert to pixel coordinates
+                                                        poly = [[p[0] * width, p[1] * height] for p in poly]
                                                     
-                                                    # Format 3: coordinates directly
-                                                    if not bbox and 'coordinates' in word:
-                                                        bbox = word['coordinates']
-                                                    
-                                                    # Format 4: polygon directly
-                                                    if not bbox and 'polygon' in word:
-                                                        bbox = word['polygon']
-                                                    
-                                                    if bbox and isinstance(bbox, list) and len(bbox) > 0:
-                                                        # Handle different vertex formats
-                                                        try:
-                                                            if isinstance(bbox[0], dict):
-                                                                # Format: [{"x": 1, "y": 2}, ...]
-                                                                poly = [[float(v.get('x', 0)), float(v.get('y', 0))] for v in bbox]
-                                                            elif isinstance(bbox[0], (list, tuple)):
-                                                                # Format: [[x, y], ...]
-                                                                poly = [[float(v[0]), float(v[1])] for v in bbox]
-                                                            else:
-                                                                continue
-                                                            
-                                                            if len(poly) >= 3:  # Valid polygon needs at least 3 points
-                                                                polygons.append(poly)
-                                                                texts.append(word.get('text', word.get('content', '')))
-                                                                labels.append('text')
-                                                        except (ValueError, IndexError, TypeError) as e:
-                                                            logger.warning(f"Error parsing bbox for word: {e}")
-                                                            continue
+                                                    if len(poly) >= 3:
+                                                        polygons.append(poly)
+                                                        
+                                                        # Get text from content
+                                                        text = ''
+                                                        content = element.get('content', {})
+                                                        if isinstance(content, dict):
+                                                            text = content.get('text', '')
+                                                            # If text is empty, try to extract from HTML
+                                                            if not text:
+                                                                html = content.get('html', '')
+                                                                if html:
+                                                                    # Simple HTML text extraction (remove tags)
+                                                                    import re
+                                                                    text = re.sub(r'<[^>]+>', ' ', html)
+                                                                    text = ' '.join(text.split())
+                                                        elif isinstance(content, str):
+                                                            text = content
+                                                        
+                                                        # Fallback to direct text field
+                                                        if not text:
+                                                            text = element.get('text', element.get('content', ''))
+                                                        
+                                                        texts.append(text)
+                                                        
+                                                        # Get label/category
+                                                        label = element.get('category', element.get('label', 'text'))
+                                                        labels.append(label)
+                                                        
+                                                except (ValueError, IndexError, TypeError) as e:
+                                                    logger.warning(f"Error parsing element coordinates: {e}")
+                                                    continue
                                         
                                         logger.info(f"Parsed {len(polygons)} polygons from async result for {request_id}")
                                         
