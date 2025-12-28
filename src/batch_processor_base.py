@@ -145,7 +145,7 @@ class ResumableBatchProcessor:
                         result = await response.json()
                         request_id = result.get('request_id')
                         if request_id:
-                            logger.debug(f"Submitted: {image_path.name} → {request_id}")
+                            logger.info(f"✓ Submitted: {image_path.name} → {request_id}")
                             if temp_file_path and temp_file_path.exists():
                                 temp_file_path.unlink()
                             return request_id
@@ -263,7 +263,7 @@ class ResumableBatchProcessor:
                                             metadata={"source": "upstage_api_async", "enhanced": False}
                                         )
                                         
-                                        logger.debug(f"Completed: {request_id}")
+                                        logger.info(f"✓ Completed: {request_id}")
                                         return result
                                     else:
                                         logger.error(f"Failed to download result for {request_id}: {result_response.status}")
