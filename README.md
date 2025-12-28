@@ -1,12 +1,19 @@
 # AWS Batch OCR Pseudo-Label Processor
 
-Standalone service for cloud-based OCR pseudo-label generation using Upstage Document Parse API.
+Standalone service for cloud-based OCR pseudo-label generation using Upstage Document Parse API or Prebuilt Extraction API.
 
 ## Quick Reference
 
-### Upstage API Endpoint
+### Upstage API Endpoints
+
+**Document Parsing (default)** - General documents:
 ```
-https://api.upstage.ai/v1/document-ai/ocr
+https://api.upstage.ai/v1/document-digitization/async
+```
+
+**Prebuilt Extraction** - Receipts/invoices (better quality for structured documents):
+```
+https://api.upstage.ai/v1/information-extraction/prebuilt-extraction
 ```
 
 **Authentication**: Bearer token (API key in header)
@@ -14,6 +21,8 @@ https://api.upstage.ai/v1/document-ai/ocr
 **Request**: Multipart form-data with image file
 
 **Response**: JSON with text polygons and content
+
+**Usage**: Select API type via `--api-type` argument (default: `document-parse`)
 
 ### Output Format
 Parquet file with OCRStorageItem schema:
@@ -149,10 +158,18 @@ export S3_BUCKET=ocr-batch-processing
 export UPSTAGE_API_KEY=your-api-key
 export DATASET_NAME=sample_10
 
+# Use Document Parsing (default, general documents)
 python -m src.processor \
   --dataset-name sample_10 \
   --batch-size 5 \
   --concurrency 2
+
+# Use Prebuilt Extraction (receipts/invoices)
+python -m src.processor \
+  --dataset-name sample_10 \
+  --batch-size 5 \
+  --concurrency 2 \
+  --api-type prebuilt-extraction
 ```
 
 ---
@@ -257,14 +274,42 @@ Fargate Container
 
 ---
 
+## API Selection
+
+The processor supports two Upstage API types:
+
+1. **Document Parsing** (`--api-type document-parse`, default)
+   - Best for: General documents, mixed content
+   - Endpoint: `v1/document-digitization/async`
+
+2. **Prebuilt Extraction** (`--api-type prebuilt-extraction`)
+   - Best for: Receipts, invoices, structured documents
+   - Endpoint: `v1/information-extraction/prebuilt-extraction`
+   - Provides higher quality results for receipt/invoice documents
+
+**When to use each:**
+- Use **Document Parsing** for general OCR tasks
+- Use **Prebuilt Extraction** for receipt/invoice datasets to improve extraction quality
+
+**Testing APIs locally:**
+```bash
+# Test Document Parsing
+python scripts/test_api_local.py image.jpg --api-type document-parse
+
+# Test Prebuilt Extraction
+python scripts/test_api_local.py receipt.jpg --api-type prebuilt-extraction
+```
+
 ## Files Reference
 
 - `src/processor.py` - Main batch processor (S3-enabled)
+- `src/batch_processor_base.py` - Core processing logic with API selection
 - `src/schemas.py` - Data models (OCRStorageItem)
 - `config/Dockerfile` - Container definition
 - `config/requirements.txt` - Dependencies (9 minimal)
 - `config/batch-job-def.json` - AWS Batch job template
 - `scripts/prepare_dataset.py` - Upload data to S3
+- `scripts/test_api_local.py` - Local API testing tool (supports both APIs)
 - `setup-aws.sh` - One-command AWS setup
 - `docs/DATA_CATALOG.md` - Schema documentation
 

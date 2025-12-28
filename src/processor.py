@@ -189,6 +189,8 @@ async def main():
     parser.add_argument("--batch-size", type=int, default=500, help="Batch size")
     parser.add_argument("--concurrency", type=int, default=3, help="Concurrent requests")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoints")
+    parser.add_argument("--api-type", type=str, default="document-parse", choices=["document-parse", "prebuilt-extraction"],
+                        help="API type to use: 'document-parse' (default, general documents) or 'prebuilt-extraction' (receipts/invoices)")
 
     args = parser.parse_args()
 
@@ -224,6 +226,7 @@ async def main():
         concurrency=args.concurrency,
         batch_size=args.batch_size,
         checkpoint_dir=local_checkpoint_dir,
+        api_type=args.api_type,
     )
 
     # Download input dataset
@@ -238,6 +241,7 @@ async def main():
     logger.info(f"  Input: s3://{s3_bucket}/{input_s3_key}")
     logger.info(f"  Output: s3://{s3_bucket}/{output_s3_key}")
     logger.info(f"  Checkpoints: s3://{s3_bucket}/{checkpoint_prefix}")
+    logger.info(f"  API Type: {args.api_type}")
     logger.info(f"  Resume: {args.resume}")
     logger.info(f"{'='*80}\n")
 

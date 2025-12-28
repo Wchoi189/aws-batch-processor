@@ -1,0 +1,298 @@
+{
+  "api": "2.0",
+  "content": {
+    "html": "<h1 id='0' style='font-size:22px'>baskiNBRrobbiNs www.baskinrobbins.co.kr</h1>\n<br><p id='1' data-category='paragraph' style='font-size:20px'>\uc8fc\ubb38\ubc88\ud638(\uc77c\ubc18\uc8fc\ubb38)<br>821</p>\n<h1 id='2' style='font-size:18px'>CAFE \uc218\uc6d0\uc5ed\uad11\uc7a5<br>\ub300\ud45c\uc790</h1>\n<br><h1 id='3' style='font-size:18px'>1248576458 Tel:031-240-2236</h1>\n<table id='4' style='font-size:14px'><thead></thead><tbody><tr><td>[\uc815\uc0c1] 2021-05-19 14:39:36 POS:08( \uc81c\ud488\uba85 \uc218\ub7c9 \uae08\uc561 (\ud560\uc778\ub0b4\uc5ed) (\ud560\uc778\uae08\uc561)</td></tr><tr><td>001 \ud30c\uc778\ud2b8 1 8,200 002 >\uc544\uc774\uc2a4 \ud648\ub7f0\ubcfc 1 0 003 >\ucd08\ucf54\ub098\ubb34 \uc232 1 0 004 >\uc0ac\ub791\uc5d0 \ube60\uc9c4 \ub538\uae30 1 0 005 >>\ub9e4\uc7a5\ucde8\uc2dd 1 0 006 >>\uc2a4\ud47c 2 0</td></tr><tr><td>\uacfc\uc138\uae08\uc561 7,455 \ubd80 \uac00 \uc138 745</td></tr><tr><td>\ucd1d\ub9e4\ucd9c\uc561 8,200 \ud569\uacc4\uae08\uc561 8,200 \ubc1b\uc740\uae08\uc561 8,200 \ub124\uc774\ubc84\ud398\uc774 ] 8,200</td></tr></tbody></table>\n<br><p id='5' data-category='paragraph' style='font-size:16px'>[</p>\n<p id='6' data-category='paragraph' style='font-size:16px'>\u25a0 \ub124\uc774\ubc84\ud30c\uc774\ub0b8\uc15c</p>\n<br><table id='7' style='font-size:16px'><thead></thead><tbody><tr><td>[ \uce74\ub4dc\ubc88\ud638 ]</td><td>9200 *</td></tr><tr><td>[ \uc2b9\uc778\ubc88\ud638 ]</td><td>71237731</td></tr><tr><td>[ \uacb0\uc81c\uae08\uc561 ]</td><td>8,200</td></tr></tbody></table>\n<p id='8' data-category='paragraph' style='font-size:14px'>5 1 0 2 2 0 8 2 1 1 1 0 0 5 1 1 0 9 A 0</p>\n<p id='9' data-category='paragraph' style='font-size:20px'>We make people happy</p>",
+    "markdown": "",
+    "text": ""
+  },
+  "elements": [
+    {
+      "category": "heading1",
+      "content": {
+        "html": "<h1 id='0' style='font-size:22px'>baskiNBRrobbiNs www.baskinrobbins.co.kr</h1>",
+        "markdown": "",
+        "text": ""
+      },
+      "coordinates": [
+        {
+          "x": 0.367,
+          "y": 0.0895
+        },
+        {
+          "x": 0.5691,
+          "y": 0.0928
+        },
+        {
+          "x": 0.5682,
+          "y": 0.1507
+        },
+        {
+          "x": 0.3661,
+          "y": 0.1473
+        }
+      ],
+      "id": 0,
+      "page": 1
+    },
+    {
+      "category": "paragraph",
+      "content": {
+        "html": "<br><p id='1' data-category='paragraph' style='font-size:20px'>\uc8fc\ubb38\ubc88\ud638(\uc77c\ubc18\uc8fc\ubb38)<br>821</p>",
+        "markdown": "",
+        "text": ""
+      },
+      "coordinates": [
+        {
+          "x": 0.3964,
+          "y": 0.1549
+        },
+        {
+          "x": 0.5225,
+          "y": 0.1571
+        },
+        {
+          "x": 0.5216,
+          "y": 0.2166
+        },
+        {
+          "x": 0.3954,
+          "y": 0.2145
+        }
+      ],
+      "id": 1,
+      "page": 1
+    },
+    {
+      "category": "heading1",
+      "content": {
+        "html": "<h1 id='2' style='font-size:18px'>CAFE \uc218\uc6d0\uc5ed\uad11\uc7a5<br>\ub300\ud45c\uc790</h1>",
+        "markdown": "",
+        "text": ""
+      },
+      "coordinates": [
+        {
+          "x": 0.3084,
+          "y": 0.2349
+        },
+        {
+          "x": 0.4184,
+          "y": 0.2368
+        },
+        {
+          "x": 0.4178,
+          "y": 0.2748
+        },
+        {
+          "x": 0.3077,
+          "y": 0.273
+        }
+      ],
+      "id": 2,
+      "page": 1
+    },
+    {
+      "category": "heading1",
+      "content": {
+        "html": "<br><h1 id='3' style='font-size:18px'>1248576458 Tel:031-240-2236</h1>",
+        "markdown": "",
+        "text": ""
+      },
+      "coordinates": [
+        {
+          "x": 0.3098,
+          "y": 0.272
+        },
+        {
+          "x": 0.5007,
+          "y": 0.2753
+        },
+        {
+          "x": 0.5004,
+          "y": 0.2951
+        },
+        {
+          "x": 0.3095,
+          "y": 0.2918
+        }
+      ],
+      "id": 3,
+      "page": 1
+    },
+    {
+      "category": "table",
+      "content": {
+        "html": "<table id='4' style='font-size:14px'><thead></thead><tbody><tr><td>[\uc815\uc0c1] 2021-05-19 14:39:36 POS:08( \uc81c\ud488\uba85 \uc218\ub7c9 \uae08\uc561 (\ud560\uc778\ub0b4\uc5ed) (\ud560\uc778\uae08\uc561)</td></tr><tr><td>001 \ud30c\uc778\ud2b8 1 8,200 002 >\uc544\uc774\uc2a4 \ud648\ub7f0\ubcfc 1 0 003 >\ucd08\ucf54\ub098\ubb34 \uc232 1 0 004 >\uc0ac\ub791\uc5d0 \ube60\uc9c4 \ub538\uae30 1 0 005 >>\ub9e4\uc7a5\ucde8\uc2dd 1 0 006 >>\uc2a4\ud47c 2 0</td></tr><tr><td>\uacfc\uc138\uae08\uc561 7,455 \ubd80 \uac00 \uc138 745</td></tr><tr><td>\ucd1d\ub9e4\ucd9c\uc561 8,200 \ud569\uacc4\uae08\uc561 8,200 \ubc1b\uc740\uae08\uc561 8,200 \ub124\uc774\ubc84\ud398\uc774 ] 8,200</td></tr></tbody></table>",
+        "markdown": "",
+        "text": ""
+      },
+      "coordinates": [
+        {
+          "x": 0.3015,
+          "y": 0.3126
+        },
+        {
+          "x": 0.6145,
+          "y": 0.3178
+        },
+        {
+          "x": 0.6084,
+          "y": 0.6793
+        },
+        {
+          "x": 0.2953,
+          "y": 0.6741
+        }
+      ],
+      "id": 4,
+      "page": 1
+    },
+    {
+      "category": "paragraph",
+      "content": {
+        "html": "<br><p id='5' data-category='paragraph' style='font-size:16px'>[</p>",
+        "markdown": "",
+        "text": ""
+      },
+      "coordinates": [
+        {
+          "x": 0.2897,
+          "y": 0.6441
+        },
+        {
+          "x": 0.3013,
+          "y": 0.6444
+        },
+        {
+          "x": 0.3009,
+          "y": 0.6645
+        },
+        {
+          "x": 0.2894,
+          "y": 0.6642
+        }
+      ],
+      "id": 5,
+      "page": 1
+    },
+    {
+      "category": "paragraph",
+      "content": {
+        "html": "<p id='6' data-category='paragraph' style='font-size:16px'>\u25a0 \ub124\uc774\ubc84\ud30c\uc774\ub0b8\uc15c</p>",
+        "markdown": "",
+        "text": ""
+      },
+      "coordinates": [
+        {
+          "x": 0.2894,
+          "y": 0.6813
+        },
+        {
+          "x": 0.423,
+          "y": 0.6835
+        },
+        {
+          "x": 0.4227,
+          "y": 0.7034
+        },
+        {
+          "x": 0.2891,
+          "y": 0.7011
+        }
+      ],
+      "id": 6,
+      "page": 1
+    },
+    {
+      "category": "table",
+      "content": {
+        "html": "<br><table id='7' style='font-size:16px'><thead></thead><tbody><tr><td>[ \uce74\ub4dc\ubc88\ud638 ]</td><td>9200 *</td></tr><tr><td>[ \uc2b9\uc778\ubc88\ud638 ]</td><td>71237731</td></tr><tr><td>[ \uacb0\uc81c\uae08\uc561 ]</td><td>8,200</td></tr></tbody></table>",
+        "markdown": "",
+        "text": ""
+      },
+      "coordinates": [
+        {
+          "x": 0.2898,
+          "y": 0.6994
+        },
+        {
+          "x": 0.6114,
+          "y": 0.7048
+        },
+        {
+          "x": 0.6104,
+          "y": 0.7654
+        },
+        {
+          "x": 0.2888,
+          "y": 0.7599
+        }
+      ],
+      "id": 7,
+      "page": 1
+    },
+    {
+      "category": "paragraph",
+      "content": {
+        "html": "<p id='8' data-category='paragraph' style='font-size:14px'>5 1 0 2 2 0 8 2 1 1 1 0 0 5 1 1 0 9 A 0</p>",
+        "markdown": "",
+        "text": ""
+      },
+      "coordinates": [
+        {
+          "x": 0.2967,
+          "y": 0.8076
+        },
+        {
+          "x": 0.6282,
+          "y": 0.8132
+        },
+        {
+          "x": 0.6278,
+          "y": 0.8336
+        },
+        {
+          "x": 0.2963,
+          "y": 0.828
+        }
+      ],
+      "id": 8,
+      "page": 1
+    },
+    {
+      "category": "paragraph",
+      "content": {
+        "html": "<p id='9' data-category='paragraph' style='font-size:20px'>We make people happy</p>",
+        "markdown": "",
+        "text": ""
+      },
+      "coordinates": [
+        {
+          "x": 0.3334,
+          "y": 0.8513
+        },
+        {
+          "x": 0.5703,
+          "y": 0.8553
+        },
+        {
+          "x": 0.5698,
+          "y": 0.8873
+        },
+        {
+          "x": 0.3328,
+          "y": 0.8832
+        }
+      ],
+      "id": 9,
+      "page": 1
+    }
+  ],
+  "model": "document-parse-251217",
+  "ocr": true,
+  "usage": {
+    "pages": 1,
+    "standard": [
+      1
+    ]
+  }
+}

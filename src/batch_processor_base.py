@@ -42,14 +42,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Upstage API configuration - Using async endpoint for better rate limit handling
-API_URL_SUBMIT = "https://api.upstage.ai/v1/document-digitization/async"
-API_URL_STATUS = "https://api.upstage.ai/v1/document-digitization/requests"
+API_URL_SUBMIT_DOCUMENT_PARSE = "https://api.upstage.ai/v1/document-digitization/async"
+API_URL_STATUS_DOCUMENT_PARSE = "https://api.upstage.ai/v1/document-digitization/requests"
+# Prebuilt Extraction uses synchronous API (no async/polling needed)
+API_URL_PREBUILT_EXTRACTION = "https://api.upstage.ai/v1/information-extraction"
 DEFAULT_CONCURRENCY = 3  # Reduced concurrency to better respect rate limits
 DEFAULT_BATCH_SIZE = 500
 REQUEST_DELAY = 0.05  # 50ms delay for submission (faster since we're not waiting)
 POLL_DELAY = 5.0  # 5s delay between polling checks (conservative to avoid rate limits)
 POLL_CONCURRENCY = 2  # Limit concurrent polling requests to avoid overwhelming API
 POLL_MAX_WAIT = 300  # Max 5 minutes wait per request
+
+# Backward compatibility
+API_URL_SUBMIT = API_URL_SUBMIT_DOCUMENT_PARSE
+API_URL_STATUS = API_URL_STATUS_DOCUMENT_PARSE
 
 
 class ResumableBatchProcessor:
@@ -62,12 +68,14 @@ class ResumableBatchProcessor:
         batch_size: int = DEFAULT_BATCH_SIZE,
         checkpoint_dir: Path | None = None,
         s3_client=None,
+        api_type: str = "document-parse",
     ):
         self.api_key = api_key
         self.concurrency = concurrency
         self.batch_size = batch_size
         self.checkpoint_dir = checkpoint_dir
         self.s3_client = s3_client  # Optional boto3 S3 client for downloading images
+        self.api_type = api_type  # "document-parse" or "prebuilt-extraction"
 
         if checkpoint_dir:
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -136,15 +144,35 @@ class ResumableBatchProcessor:
                 with open(image_path, 'rb') as f:
                     image_bytes = f.read()
 
-                # Submit to async API
+                # Select API endpoint and method based on api_type
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 data = aiohttp.FormData()
                 data.add_field('document', image_bytes, filename=image_path.name)
-                data.add_field('model', 'document-parse')
+                
+                if self.api_type == "prebuilt-extraction":
+                    # Prebuilt Extraction uses synchronous API
+                    submit_url = API_URL_PREBUILT_EXTRACTION
+                    data.add_field('model', 'receipt-extraction')
+                else:
+                    # Document Parse uses async API
+                    submit_url = API_URL_SUBMIT_DOCUMENT_PARSE
+                    data.add_field('model', 'document-parse')
 
-                async with session.post(API_URL_SUBMIT, headers=headers, data=data) as response:
+                async with session.post(submit_url, headers=headers, data=data) as response:
                     if response.status == 200:
                         result = await response.json()
+                        
+                        # Prebuilt Extraction returns results directly (synchronous)
+                        if self.api_type == "prebuilt-extraction":
+                            # Store result for direct processing (no polling needed)
+                            # We'll return a special marker and process immediately
+                            logger.info(f"✓ Prebuilt Extraction completed: {image_path.name}")
+                            if temp_file_path and temp_file_path.exists():
+                                temp_file_path.unlink()
+                            # Return result dict wrapped in a way we can identify it
+                            return {"type": "prebuilt-extraction", "result": result}
+                        
+                        # Document Parse returns request_id (async)
                         request_id = result.get('request_id')
                         if request_id:
                             logger.info(f"✓ Submitted: {image_path.name} → {request_id}")
@@ -205,7 +233,17 @@ class ResumableBatchProcessor:
                 await poll_semaphore.acquire()
             
             try:
-                async with session.get(f"{API_URL_STATUS}/{request_id}", headers=headers) as response:
+                # Prebuilt Extraction doesn't use polling (synchronous API)
+                # This should not be called for prebuilt-extraction, but handle it gracefully
+                if self.api_type == "prebuilt-extraction":
+                    logger.warning(f"Polling called for prebuilt-extraction (should not happen)")
+                    if poll_semaphore:
+                        poll_semaphore.release()
+                    return None
+                
+                # Document Parse uses async polling
+                status_url = f"{API_URL_STATUS_DOCUMENT_PARSE}/{request_id}"
+                async with session.get(status_url, headers=headers) as response:
                     if response.status == 200:
                         # Reset retry count on successful response
                         retry_count = 0
@@ -235,12 +273,13 @@ class ResumableBatchProcessor:
                                         labels = []
 
                                         # Log actual response structure for debugging
-                                        logger.debug(f"API response type: {type(api_result)}")
+                                        logger.debug(f"API response type: {type(api_result)} (API type: {self.api_type})")
                                         if isinstance(api_result, dict):
                                             logger.debug(f"API response keys: {list(api_result.keys())}")
                                         
                                         # Upstage async API returns structure: {elements: [...], content: {...}, ocr: bool}
                                         # Elements have: coordinates (normalized 0-1), content.text/html, category
+                                        # Prebuilt Extraction may have similar or different structure
                                         
                                         elements = []
                                         
@@ -405,7 +444,7 @@ class ResumableBatchProcessor:
                                             polygons=polygons,
                                             texts=texts,
                                             labels=labels,
-                                            metadata={"source": "upstage_api_async", "enhanced": False}
+                                            metadata={"source": f"upstage_api_async_{self.api_type}", "enhanced": False, "api_type": self.api_type}
                                         )
                                         
                                         logger.info(f"✓ Completed: {request_id}")
@@ -473,6 +512,74 @@ class ResumableBatchProcessor:
         logger.error(f"Timeout waiting for {request_id}")
         return None
 
+    def _parse_prebuilt_extraction_result(self, api_result: dict, image_row: dict) -> tuple[list, list, list]:
+        """Parse Prebuilt Extraction API response (fields structure) into polygons, texts, labels."""
+        polygons = []
+        texts = []
+        labels = []
+        
+        fields = api_result.get('fields', [])
+        
+        # Get image dimensions
+        width = int(image_row.get('width', 0))
+        height = int(image_row.get('height', 0))
+        
+        # Try to get dimensions from metadata
+        if (width == 0 or height == 0) and 'metadata' in api_result:
+            pages = api_result.get('metadata', {}).get('pages', [])
+            if pages and len(pages) > 0:
+                width = int(pages[0].get('width', 0))
+                height = int(pages[0].get('height', 0))
+        
+        # Extract text from fields
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            
+            field_type = field.get('type', '')
+            field_value = field.get('value', '')
+            refined_value = field.get('refinedValue', '')
+            field_key = field.get('key', '')
+            
+            # Use refined value if available, otherwise use value
+            text = refined_value if refined_value else field_value
+            
+            if text:
+                texts.append(text)
+                
+                # Create label from key (e.g., "store.store_name" -> "store_name")
+                if field_key:
+                    label_parts = field_key.split('.')
+                    label = label_parts[-1] if len(label_parts) > 1 else field_key
+                else:
+                    label = field_type if field_type else 'text'
+                labels.append(label)
+                
+                # For Prebuilt Extraction, we don't have coordinate information
+                # Create a placeholder polygon (full image or empty)
+                # In practice, you might want to use OCR coordinates if available
+                # For now, we'll use empty polygons since coordinates aren't in the response
+                polygons.append([])
+            
+            # Also process properties if it's a group
+            if field_type == 'group' and 'properties' in field:
+                properties = field.get('properties', [])
+                for prop in properties:
+                    if isinstance(prop, dict):
+                        prop_value = prop.get('refinedValue', prop.get('value', ''))
+                        if prop_value:
+                            texts.append(prop_value)
+                            prop_key = prop.get('key', '')
+                            if prop_key:
+                                label_parts = prop_key.split('.')
+                                label = label_parts[-1] if len(label_parts) > 1 else prop_key
+                            else:
+                                label = prop.get('type', 'text')
+                            labels.append(label)
+                            polygons.append([])
+        
+        return polygons, texts, labels
+
     async def process_single_image(
         self,
         session: aiohttp.ClientSession,
@@ -483,13 +590,51 @@ class ResumableBatchProcessor:
         retry_count: int = 0,
         max_retries: int = 3,
     ) -> OCRStorageItem | None:
-        """Process a single image using async API (submit + poll)."""
+        """Process a single image using async API (submit + poll) or sync API (prebuilt extraction)."""
         # Phase 1: Submit
-        request_id = await self.submit_image_async(session, semaphore, image_row, retry_count, max_retries)
-        if not request_id:
+        submit_result = await self.submit_image_async(session, semaphore, image_row, retry_count, max_retries)
+        if not submit_result:
             return None
         
-        # Phase 2: Poll and get result (with polling rate limit)
+        # Prebuilt Extraction returns results directly (synchronous)
+        if isinstance(submit_result, dict) and submit_result.get('type') == 'prebuilt-extraction':
+            api_result = submit_result.get('result', {})
+            
+            # Parse Prebuilt Extraction response
+            polygons, texts, labels = self._parse_prebuilt_extraction_result(api_result, image_row)
+            
+            # Get image dimensions
+            width = int(image_row.get('width', 0))
+            height = int(image_row.get('height', 0))
+            if (width == 0 or height == 0) and 'metadata' in api_result:
+                pages = api_result.get('metadata', {}).get('pages', [])
+                if pages and len(pages) > 0:
+                    width = int(pages[0].get('width', 0))
+                    height = int(pages[0].get('height', 0))
+            
+            # Create storage item
+            image_path_str = image_row['image_path']
+            original_image_path = image_path_str if image_path_str.startswith('s3://') else str(image_path_str)
+            image_filename = Path(image_path_str).name if image_path_str.startswith('s3://') else Path(image_path_str).name
+            
+            result = OCRStorageItem(
+                id=f"{dataset_name}_pseudo_{Path(image_path_str).stem}",
+                split="pseudo",
+                image_path=original_image_path,
+                image_filename=image_filename,
+                width=width,
+                height=height,
+                polygons=polygons,
+                texts=texts,
+                labels=labels,
+                metadata={"source": f"upstage_api_prebuilt_extraction", "enhanced": False, "api_type": self.api_type}
+            )
+            
+            logger.info(f"✓ Prebuilt Extraction completed: {image_filename} ({len(texts)} fields extracted)")
+            return result
+        
+        # Document Parse uses async API - poll for result
+        request_id = submit_result
         return await self.poll_and_get_result(session, request_id, image_row, dataset_name, poll_semaphore)
 
     async def process_batch(
@@ -557,7 +702,7 @@ class ResumableBatchProcessor:
                         polygons=[],
                         texts=[],
                         labels=[],
-                        metadata={"source": "upstage_api_async", "enhanced": False, "status": "failed"}
+                        metadata={"source": f"upstage_api_async_{self.api_type}", "enhanced": False, "status": "failed", "api_type": self.api_type}
                     )
                     results.append(failed_result)
 
