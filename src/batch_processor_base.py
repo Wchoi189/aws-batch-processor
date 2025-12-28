@@ -227,32 +227,140 @@ class ResumableBatchProcessor:
                                         texts = []
                                         labels = []
 
+                                        # Log actual response structure for debugging
+                                        logger.info(f"API response type: {type(api_result)}")
+                                        if isinstance(api_result, dict):
+                                            logger.info(f"API response keys: {list(api_result.keys())}")
+                                        
                                         # Try different response formats
+                                        pages = []
+                                        
                                         # Format 1: Direct pages array (sync API format)
-                                        pages = api_result.get('pages', [])
+                                        if isinstance(api_result, dict):
+                                            pages = api_result.get('pages', [])
+                                            
+                                            # Format 2: Nested structure (async API might wrap it)
+                                            if not pages and 'result' in api_result:
+                                                result_data = api_result['result']
+                                                if isinstance(result_data, dict):
+                                                    pages = result_data.get('pages', [])
+                                                elif isinstance(result_data, list):
+                                                    pages = result_data
+                                            
+                                            # Format 3: Check for document structure
+                                            if not pages and 'document' in api_result:
+                                                doc = api_result['document']
+                                                if isinstance(doc, dict):
+                                                    pages = doc.get('pages', [])
                                         
-                                        # Format 2: Nested structure (async API might wrap it)
-                                        if not pages and 'result' in api_result:
-                                            pages = api_result['result'].get('pages', [])
-                                        
-                                        # Format 3: Check if it's a list directly
+                                        # Format 4: Check if it's a list directly
                                         if not pages and isinstance(api_result, list):
                                             pages = api_result
                                         
-                                        for page in pages:
+                                        logger.info(f"Found {len(pages)} pages")
+                                        
+                                        # Parse pages
+                                        for page_idx, page in enumerate(pages):
                                             # Handle both dict and direct word lists
-                                            words = page.get('words', []) if isinstance(page, dict) else page
+                                            if isinstance(page, dict):
+                                                words = page.get('words', [])
+                                                # Also check for other possible keys
+                                                if not words:
+                                                    words = page.get('blocks', [])
+                                                if not words:
+                                                    words = page.get('elements', [])
+                                            elif isinstance(page, list):
+                                                words = page
+                                            else:
+                                                words = []
+                                            
+                                            logger.debug(f"Page {page_idx}: {len(words)} words")
                                             
                                             for word in words:
                                                 if isinstance(word, dict):
-                                                    bbox = word.get('boundingBox', {}).get('vertices', [])
-                                                    if bbox:
-                                                        poly = [[float(v.get('x', 0)), float(v.get('y', 0))] for v in bbox]
-                                                        polygons.append(poly)
-                                                        texts.append(word.get('text', ''))
-                                                        labels.append('text')
+                                                    # Try multiple bounding box formats
+                                                    bbox = None
+                                                    
+                                                    # Format 1: boundingBox.vertices
+                                                    if 'boundingBox' in word:
+                                                        bbox_obj = word['boundingBox']
+                                                        if isinstance(bbox_obj, dict):
+                                                            bbox = bbox_obj.get('vertices', [])
+                                                        elif isinstance(bbox_obj, list):
+                                                            bbox = bbox_obj
+                                                    
+                                                    # Format 2: bbox directly
+                                                    if not bbox and 'bbox' in word:
+                                                        bbox = word['bbox']
+                                                    
+                                                    # Format 3: coordinates directly
+                                                    if not bbox and 'coordinates' in word:
+                                                        bbox = word['coordinates']
+                                                    
+                                                    # Format 4: polygon directly
+                                                    if not bbox and 'polygon' in word:
+                                                        bbox = word['polygon']
+                                                    
+                                                    if bbox and isinstance(bbox, list) and len(bbox) > 0:
+                                                        # Handle different vertex formats
+                                                        try:
+                                                            if isinstance(bbox[0], dict):
+                                                                # Format: [{"x": 1, "y": 2}, ...]
+                                                                poly = [[float(v.get('x', 0)), float(v.get('y', 0))] for v in bbox]
+                                                            elif isinstance(bbox[0], (list, tuple)):
+                                                                # Format: [[x, y], ...]
+                                                                poly = [[float(v[0]), float(v[1])] for v in bbox]
+                                                            else:
+                                                                continue
+                                                            
+                                                            if len(poly) >= 3:  # Valid polygon needs at least 3 points
+                                                                polygons.append(poly)
+                                                                texts.append(word.get('text', word.get('content', '')))
+                                                                labels.append('text')
+                                                        except (ValueError, IndexError, TypeError) as e:
+                                                            logger.warning(f"Error parsing bbox for word: {e}")
+                                                            continue
                                         
-                                        logger.debug(f"Parsed {len(polygons)} polygons from async result")
+                                        logger.info(f"Parsed {len(polygons)} polygons from async result for {request_id}")
+                                        
+                                        # Extract image dimensions from API response if available
+                                        width = int(image_row.get('width', 0))
+                                        height = int(image_row.get('height', 0))
+                                        
+                                        if width == 0 or height == 0:
+                                            # Try to get from API response
+                                            if isinstance(api_result, dict):
+                                                if 'width' in api_result:
+                                                    width = int(api_result.get('width', 0))
+                                                if 'height' in api_result:
+                                                    height = int(api_result.get('height', 0))
+                                                
+                                                # Check pages for dimensions
+                                                if (width == 0 or height == 0) and 'pages' in api_result and len(api_result['pages']) > 0:
+                                                    first_page = api_result['pages'][0]
+                                                    if isinstance(first_page, dict):
+                                                        if 'width' in first_page:
+                                                            width = int(first_page.get('width', 0))
+                                                        if 'height' in first_page:
+                                                            height = int(first_page.get('height', 0))
+                                        
+                                        # CRITICAL: Log warning if no polygons found
+                                        if len(polygons) == 0:
+                                            logger.error(f"⚠️  NO POLYGONS PARSED for {request_id}!")
+                                            logger.error(f"   Image: {image_row.get('image_filename', 'unknown')}")
+                                            logger.error(f"   Response type: {type(api_result)}")
+                                            if isinstance(api_result, dict):
+                                                logger.error(f"   Response keys: {list(api_result.keys())}")
+                                                # Log sample of response structure
+                                                import json
+                                                try:
+                                                    response_sample = json.dumps(api_result, indent=2)[:2000]
+                                                    logger.error(f"   Response sample:\n{response_sample}")
+                                                except:
+                                                    logger.error(f"   Response (str): {str(api_result)[:1000]}")
+                                            
+                                            # Still return the result (with empty polygons) so we can track failures
+                                            # But log it as an error
 
                                         # Create storage item
                                         image_path_str = image_row['image_path']
