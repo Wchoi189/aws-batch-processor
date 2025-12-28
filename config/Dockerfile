@@ -12,14 +12,16 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for fast package management
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.cargo/bin:${PATH}"
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    /root/.local/bin/uv --version
+
+ENV PATH="/root/.local/bin:${PATH}"
 
 # Copy dependency files first (for layer caching)
 COPY config/requirements.txt /tmp/requirements.txt
 
 # Install minimal Python dependencies
-RUN uv pip install --system -r /tmp/requirements.txt
+RUN /root/.local/bin/uv pip install --system -r /tmp/requirements.txt
 
 # Copy application code
 COPY src/ /app/src/
