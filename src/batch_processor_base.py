@@ -43,10 +43,11 @@ logger = logging.getLogger(__name__)
 # Upstage API configuration - Using async endpoint for better rate limit handling
 API_URL_SUBMIT = "https://api.upstage.ai/v1/document-digitization/async"
 API_URL_STATUS = "https://api.upstage.ai/v1/document-digitization/requests"
-DEFAULT_CONCURRENCY = 5  # Higher concurrency for async submission (no waiting)
+DEFAULT_CONCURRENCY = 3  # Reduced concurrency to better respect rate limits
 DEFAULT_BATCH_SIZE = 500
 REQUEST_DELAY = 0.05  # 50ms delay for submission (faster since we're not waiting)
-POLL_DELAY = 2.0  # 2s delay between polling checks
+POLL_DELAY = 5.0  # 5s delay between polling checks (conservative to avoid rate limits)
+POLL_CONCURRENCY = 2  # Limit concurrent polling requests to avoid overwhelming API
 POLL_MAX_WAIT = 300  # Max 5 minutes wait per request
 
 
@@ -188,17 +189,25 @@ class ResumableBatchProcessor:
         request_id: str,
         image_row: dict,
         dataset_name: str,
+        poll_semaphore: asyncio.Semaphore | None = None,
     ) -> OCRStorageItem | None:
         """Poll for async result and download when ready."""
         start_time = time.time()
         headers = {"Authorization": f"Bearer {self.api_key}"}
+        retry_count = 0  # Track consecutive rate limits for exponential backoff
         
         while time.time() - start_time < POLL_MAX_WAIT:
             await asyncio.sleep(POLL_DELAY)
             
+            # Use semaphore to limit concurrent polling requests
+            if poll_semaphore:
+                await poll_semaphore.acquire()
+            
             try:
                 async with session.get(f"{API_URL_STATUS}/{request_id}", headers=headers) as response:
                     if response.status == 200:
+                        # Reset retry count on successful response
+                        retry_count = 0
                         status_data = await response.json()
                         status = status_data.get('status')
                         
@@ -264,31 +273,64 @@ class ResumableBatchProcessor:
                                         )
                                         
                                         logger.info(f"✓ Completed: {request_id}")
+                                        # Release semaphore before returning
+                                        if poll_semaphore:
+                                            poll_semaphore.release()
                                         return result
                                     else:
                                         logger.error(f"Failed to download result for {request_id}: {result_response.status}")
+                                        if poll_semaphore:
+                                            poll_semaphore.release()
                                         return None
                             else:
                                 logger.error(f"No download_url in completed request {request_id}")
+                                if poll_semaphore:
+                                    poll_semaphore.release()
                                 return None
                                 
                         elif status == 'failed':
                             failure_msg = status_data.get('failure_message', 'Unknown error')
                             logger.error(f"Request {request_id} failed: {failure_msg}")
+                            if poll_semaphore:
+                                poll_semaphore.release()
                             return None
                         # else: still processing, continue polling
+                        # Semaphore will be released after this iteration completes
                         
                     elif response.status == 429:
-                        logger.warning(f"Rate limited (poll): {request_id}")
-                        await asyncio.sleep(POLL_DELAY * 2)
+                        # Check for Retry-After header (in seconds)
+                        retry_after = response.headers.get('Retry-After')
+                        if retry_after:
+                            try:
+                                wait_time = int(retry_after)
+                            except ValueError:
+                                wait_time = POLL_DELAY * 4  # Default to 8s if header invalid
+                        else:
+                            # Exponential backoff: 4s, 8s, 16s, 32s, max 60s
+                            wait_time = min(POLL_DELAY * (2 ** min(5, retry_count + 1)), 60)
+                        
+                        retry_count += 1
+                        logger.warning(f"Rate limited (poll): {request_id}, waiting {wait_time}s (attempt {retry_count})")
+                        # Release semaphore before waiting
+                        if poll_semaphore:
+                            poll_semaphore.release()
+                        await asyncio.sleep(wait_time)
                         continue
                     else:
                         error_text = await response.text()
                         logger.error(f"Poll error {response.status} for {request_id}: {error_text[:200]}")
+                        if poll_semaphore:
+                            poll_semaphore.release()
                         return None
+                    
+                    # Release semaphore after each polling attempt (for "still processing" case)
+                    if poll_semaphore:
+                        poll_semaphore.release()
                         
             except Exception as e:
                 logger.error(f"Error polling {request_id}: {e}")
+                if poll_semaphore:
+                    poll_semaphore.release()
                 await asyncio.sleep(POLL_DELAY)
                 continue
         
@@ -301,6 +343,7 @@ class ResumableBatchProcessor:
         semaphore: asyncio.Semaphore,
         image_row: dict,
         dataset_name: str,
+        poll_semaphore: asyncio.Semaphore | None = None,
         retry_count: int = 0,
         max_retries: int = 3,
     ) -> OCRStorageItem | None:
@@ -310,8 +353,8 @@ class ResumableBatchProcessor:
         if not request_id:
             return None
         
-        # Phase 2: Poll and get result
-        return await self.poll_and_get_result(session, request_id, image_row, dataset_name)
+        # Phase 2: Poll and get result (with polling rate limit)
+        return await self.poll_and_get_result(session, request_id, image_row, dataset_name, poll_semaphore)
 
     async def process_batch(
         self,
@@ -322,12 +365,14 @@ class ResumableBatchProcessor:
         """Process a batch of images asynchronously."""
         results = []
         semaphore = asyncio.Semaphore(self.concurrency)
+        # Separate semaphore for polling to limit concurrent polling requests
+        poll_semaphore = asyncio.Semaphore(POLL_CONCURRENCY)
 
         async with aiohttp.ClientSession() as session:
             tasks = []
             for idx, row in df.iloc[start_idx:].iterrows():
                 task = self.process_single_image(
-                    session, semaphore, row.to_dict(), dataset_name
+                    session, semaphore, row.to_dict(), dataset_name, poll_semaphore
                 )
                 tasks.append(task)
 
