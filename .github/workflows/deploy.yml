@@ -62,22 +62,19 @@ jobs:
           {
             "jobDefinitionName": "pseudo-label-processor",
             "type": "container",
+            "platformCapabilities": [
+              "FARGATE"
+            ],
             "containerProperties": {
               "image": "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest",
-              "vcpus": 2,
-              "memory": 4096,
+              "fargatePlatformConfiguration": {
+                "platformVersion": "LATEST"
+              },
               "jobRoleArn": "${{ secrets.JOB_ROLE_ARN }}",
               "executionRoleArn": "${{ secrets.EXEC_ROLE_ARN }}",
-              "environment": [
-                {
-                  "name": "AWS_SECRET_ARN",
-                  "value": "${{ secrets.SECRET_ARN }}"
-                },
-                {
-                  "name": "S3_BUCKET",
-                  "value": "${{ secrets.S3_BUCKET }}"
-                }
-              ],
+              "networkConfiguration": {
+                "assignPublicIp": "ENABLED"
+              },
               "resourceRequirements": [
                 {
                   "type": "VCPU",
@@ -86,6 +83,20 @@ jobs:
                 {
                   "type": "MEMORY",
                   "value": "4096"
+                }
+              ],
+              "environment": [
+                {
+                  "name": "AWS_SECRET_ARN",
+                  "value": "${{ secrets.SECRET_ARN }}"
+                },
+                {
+                  "name": "S3_BUCKET",
+                  "value": "${{ secrets.S3_BUCKET }}"
+                },
+                {
+                  "name": "CHECKPOINT_PREFIX",
+                  "value": "checkpoints/"
                 }
               ],
               "command": [
