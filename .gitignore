@@ -13,6 +13,7 @@ ENV/
 # AWS
 .aws/
 *.pem
+aws/config.env
 
 # Environment variables
 .env

@@ -5,7 +5,7 @@
 set -e
 
 # Configuration
-REGION="${AWS_REGION:-us-east-1}"
+REGION="${AWS_REGION:-ap-northeast-2}"
 BUCKET_NAME="${S3_BUCKET:-ocr-batch-processing}"
 ECR_REPO_NAME="${ECR_REPO:-batch-processor}"
 SECRET_NAME="${SECRET_NAME:-upstage-api-key}"
@@ -191,33 +191,92 @@ sleep 15
 echo ""
 echo "5️⃣  Creating AWS Batch compute environment..."
 
-# Get default VPC and subnets
-VPC_ID=$(aws ec2 describe-vpcs --filters "Name=is-default,Values=true" --query 'Vpcs[0].VpcId' --output text --region "$REGION")
-SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[*].SubnetId' --output text --region "$REGION" | tr '\t' ',' | sed 's/,$//')
-SECURITY_GROUP=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=default" --query 'SecurityGroups[0].GroupId' --output text --region "$REGION")
+# Get default VPC and subnets (or use first available VPC, or create one)
+VPC_ID=$(aws ec2 describe-vpcs --filters "Name=is-default,Values=true" --query 'Vpcs[0].VpcId' --output text --region "$REGION" 2>/dev/null)
+
+# If no default VPC, get the first available VPC
+if [ -z "$VPC_ID" ] || [ "$VPC_ID" == "None" ]; then
+    echo "   ℹ️  No default VPC found, checking for existing VPCs..."
+    VPC_ID=$(aws ec2 describe-vpcs --query 'Vpcs[0].VpcId' --output text --region "$REGION" 2>/dev/null)
+fi
+
+# If still no VPC, create one
+if [ -z "$VPC_ID" ] || [ "$VPC_ID" == "None" ]; then
+    echo "   ℹ️  No VPC found, creating default VPC..."
+    VPC_OUTPUT=$(aws ec2 create-default-vpc --region "$REGION" 2>&1)
+    if [ $? -eq 0 ]; then
+        VPC_ID=$(echo "$VPC_OUTPUT" | grep -oP '"VpcId":\s*"\K[^"]+' || echo "$VPC_OUTPUT" | jq -r '.Vpc.VpcId' 2>/dev/null || echo "")
+        if [ -z "$VPC_ID" ]; then
+            # Try to get it from describe after creation
+            sleep 2
+            VPC_ID=$(aws ec2 describe-vpcs --filters "Name=is-default,Values=true" --query 'Vpcs[0].VpcId' --output text --region "$REGION" 2>/dev/null)
+        fi
+        echo "   ✓ Created default VPC: $VPC_ID"
+    else
+        echo "   ❌ Failed to create VPC. Error: $VPC_OUTPUT"
+        echo "   💡 Please create a VPC manually in the AWS Console and rerun this script."
+        exit 1
+    fi
+fi
+
+if [ -z "$VPC_ID" ] || [ "$VPC_ID" == "None" ]; then
+    echo "   ❌ No VPC available in region $REGION"
+    exit 1
+fi
+
+echo "   ✓ Using VPC: $VPC_ID"
+
+# Get subnets (wait a bit if VPC was just created)
+SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[*].SubnetId' --output text --region "$REGION" 2>/dev/null | tr '\t' ',' | sed 's/,$//')
+
+# If no subnets found, wait a bit and try again (VPC creation takes time)
+if [ -z "$SUBNETS" ]; then
+    echo "   ⏳ Waiting for subnets to be available (10s)..."
+    sleep 10
+    SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" --query 'Subnets[*].SubnetId' --output text --region "$REGION" 2>/dev/null | tr '\t' ',' | sed 's/,$//')
+fi
+
+if [ -z "$SUBNETS" ]; then
+    echo "   ❌ No subnets found in VPC $VPC_ID"
+    echo "   💡 Subnets may take a few minutes to be created. Please wait and rerun this script."
+    exit 1
+fi
+
+echo "   ✓ Found subnets: $SUBNETS"
+
+# Get security group (try default first, then any security group in the VPC)
+SECURITY_GROUP=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=default" --query 'SecurityGroups[0].GroupId' --output text --region "$REGION" 2>/dev/null)
+
+if [ -z "$SECURITY_GROUP" ] || [ "$SECURITY_GROUP" == "None" ]; then
+    echo "   ℹ️  No default security group found, using first available security group..."
+    SECURITY_GROUP=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[0].GroupId' --output text --region "$REGION" 2>/dev/null)
+fi
+
+if [ -z "$SECURITY_GROUP" ] || [ "$SECURITY_GROUP" == "None" ]; then
+    echo "   ❌ No security group found in VPC $VPC_ID"
+    exit 1
+fi
+
+echo "   ✓ Using security group: $SECURITY_GROUP"
 
 if aws batch describe-compute-environments --compute-environments "$BATCH_COMPUTE_ENV" --region "$REGION" &>/dev/null; then
     echo "   ℹ️  Compute environment already exists: $BATCH_COMPUTE_ENV"
 else
+    # Create Fargate Spot compute environment (cheapest option)
     aws batch create-compute-environment \
         --compute-environment-name "$BATCH_COMPUTE_ENV" \
         --type MANAGED \
         --state ENABLED \
         --service-role "$SERVICE_ROLE_ARN" \
         --compute-resources "{
-            \"type\": \"SPOT\",
-            \"allocationStrategy\": \"SPOT_CAPACITY_OPTIMIZED\",
-            \"minvCpus\": 0,
+            \"type\": \"FARGATE_SPOT\",
             \"maxvCpus\": 16,
-            \"desiredvCpus\": 0,
-            \"instanceTypes\": [\"optimal\"],
             \"subnets\": [$(echo $SUBNETS | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/') ],
-            \"securityGroupIds\": [\"$SECURITY_GROUP\"],
-            \"instanceRole\": \"arn:aws:iam::${ACCOUNT_ID}:instance-profile/ecsInstanceRole\"
+            \"securityGroupIds\": [\"$SECURITY_GROUP\"]
         }" \
         --region "$REGION"
 
-    echo "   ✓ Created compute environment: $BATCH_COMPUTE_ENV"
+    echo "   ✓ Created Fargate Spot compute environment: $BATCH_COMPUTE_ENV"
 fi
 
 # 6. Create AWS Batch Job Queue
@@ -275,6 +334,7 @@ echo ""
 echo "========================================="
 
 # Save configuration to file
+mkdir -p aws
 cat > aws/config.env <<EOF
 # AWS Batch Configuration
 # Generated: $(date)
